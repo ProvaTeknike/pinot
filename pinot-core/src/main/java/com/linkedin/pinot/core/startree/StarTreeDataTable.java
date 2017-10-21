@@ -22,104 +22,78 @@ import it.unimi.dsi.fastutil.Swapper;
 import it.unimi.dsi.fastutil.ints.Int2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.IntComparator;
-import java.io.File;
+import java.io.Closeable;
 import java.io.IOException;
-import java.nio.ByteOrder;
+import java.nio.ByteBuffer;
 import java.util.Iterator;
+import org.apache.commons.lang3.tuple.ImmutablePair;
 import org.apache.commons.lang3.tuple.Pair;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import xerial.larray.buffer.LBuffer;
 import xerial.larray.buffer.LBufferAPI;
 import xerial.larray.mmap.MMapBuffer;
-import xerial.larray.mmap.MMapMode;
 
 
 /**
- * The StarTreeDataTable should be able to handle the memory range greater than 2GB.
- * As a result, all fields related to memory position should be declared as long to avoid int overflow.
+ * The class <code>StarTreeDataTable</code> works on a LBufferAPI and provides the helper methods to build the
+ * star-tree.
+ * <p>Implemented to be able to handle the memory range greater than 2GB.
  */
-public class StarTreeDataTable {
-  private static final Logger LOGGER = LoggerFactory.getLogger(StarTreeDataTable.class);
+public class StarTreeDataTable implements Closeable {
+  private final LBufferAPI _dataBuffer;
+  private final int _dimensionSize;
+  private final int _metricSize;
+  private final long _docSize;
+  private final int _numDocs;
 
-  private static final Int2ObjectMap<IntPair> EMPTY_INT_OBJECT_MAP = new Int2ObjectLinkedOpenHashMap<>();
-  private static final ByteOrder nativeByteOrder = ByteOrder.nativeOrder();
-
-  private File file;
-  private int dimensionSizeInBytes;
-  private int metricSizeInBytes;
-  private int totalSizeInBytes;
-  final int[] sortOrder;
-
-  // Re-usable buffers
-  private LBuffer dimLbuf1;
-  private LBuffer dimLbuf2;
-  private LBufferAPI dimMetLbuf1;
-  private LBufferAPI dimMetLbuf2;
-
-  public StarTreeDataTable(File file, int dimensionSizeInBytes, int metricSizeInBytes, int[] sortOrder) {
-    this.file = file;
-    this.dimensionSizeInBytes = dimensionSizeInBytes;
-    this.metricSizeInBytes = metricSizeInBytes;
-    this.sortOrder = sortOrder;
-    this.totalSizeInBytes = dimensionSizeInBytes + metricSizeInBytes;
-
-    dimLbuf1 = new LBuffer(dimensionSizeInBytes);
-    dimLbuf2 = new LBuffer(dimensionSizeInBytes);
-    dimMetLbuf1 = new LBuffer(totalSizeInBytes);
-    dimMetLbuf2 = new LBuffer(totalSizeInBytes);
+  public StarTreeDataTable(LBufferAPI dataBuffer, int dimensionSize, int metricSize, int numDocs) {
+    _dataBuffer = dataBuffer;
+    _dimensionSize = dimensionSize;
+    _metricSize = metricSize;
+    _docSize = dimensionSize + metricSize;
+    // NOTE: number of documents cannot be derived from dataBuffer.size() because for MMapBuffer, dataBuffer.size()
+    // could be larger than the given length because of page alignment
+    _numDocs = numDocs;
   }
 
   /**
+   * Sort the documents inside the data buffer based on the sort order.
+   * <p>To reduce the number of swaps inside the data buffer, we first sort on an array which only read from the data
+   * buffer, then re-arrange the actual document inside the data buffer based on the sorted array.
    *
-   * @param startRecordId inclusive
-   * @param endRecordId exclusive
+   * @param sortOrder Sort order of dimensions
    */
-  public void sort(int startRecordId, int endRecordId) {
-    final MMapBuffer mappedByteBuffer;
-    try {
-      int numRecords = endRecordId - startRecordId;
-      final long startOffset = startRecordId * (long) totalSizeInBytes;
-
-      // Sort the docIds without actually moving the docs themselves.
-      mappedByteBuffer = new MMapBuffer(file, startOffset, numRecords * (long) totalSizeInBytes, MMapMode.READ_WRITE);
-      final int[] sortedDocIds = getSortedDocIds(mappedByteBuffer, totalSizeInBytes, dimensionSizeInBytes, numRecords);
-
-      // Re-arrange the docs as per the sorted docId order.
-      sortMmapBuffer(mappedByteBuffer, totalSizeInBytes, numRecords, sortedDocIds);
-    } catch (IOException e) {
-      LOGGER.error("Exception caught while sorting records", e);
-    }
+  public void sort(int[] sortOrder) {
+    int[] sortedDocIds = getSortedDocIds(sortOrder);
+    reArrangeDocs(sortedDocIds);
   }
 
   /**
-   * Helper method that returns an array of docIds sorted as per dimension sort order.
+   * Get the sorted document ids based on the documents inside the data buffer.
    *
-   * @param mappedByteBuffer Mmap buffer containing docs to sort
-   * @param recordSizeInBytes Size of one record in bytes
-   * @param dimensionSizeInBytes Size of dimension columns in bytes
-   * @param numRecords Number of records
-   * @return DocId array in sorted order
+   * @param sortOrder Sort order of dimensions
+   * @return Array of sorted document ids (proper location of each document)
    */
-  private int[] getSortedDocIds(final MMapBuffer mappedByteBuffer, final long recordSizeInBytes,
-      final long dimensionSizeInBytes, int numRecords) {
-    final int[] ids = new int[numRecords];
-    for (int i = 0; i < ids.length; i++) {
-      ids[i] = i;
+  private int[] getSortedDocIds(final int[] sortOrder) {
+    final int[] docIds = new int[_numDocs];
+    for (int i = 0; i < _numDocs; i++) {
+      docIds[i] = i;
     }
+
+    final LBuffer dimensionBuffer1 = new LBuffer(_dimensionSize);
+    final LBuffer dimensionBuffer2 = new LBuffer(_dimensionSize);
 
     IntComparator comparator = new IntComparator() {
       @Override
       public int compare(int i1, int i2) {
-        long pos1 = (ids[i1]) * recordSizeInBytes;
-        long pos2 = (ids[i2]) * recordSizeInBytes;
+        long offset1 = docIds[i1] * _docSize;
+        long offset2 = docIds[i2] * _docSize;
 
-        mappedByteBuffer.copyTo(pos1, dimLbuf1, 0, dimensionSizeInBytes);
-        mappedByteBuffer.copyTo(pos2, dimLbuf2, 0, dimensionSizeInBytes);
+        _dataBuffer.copyTo(offset1, dimensionBuffer1, 0, _dimensionSize);
+        _dataBuffer.copyTo(offset2, dimensionBuffer2, 0, _dimensionSize);
 
-        for (int dimIndex : sortOrder) {
-          int v1 = flipEndiannessIfNeeded(dimLbuf1.getInt(dimIndex * V1Constants.Numbers.INTEGER_SIZE));
-          int v2 = flipEndiannessIfNeeded(dimLbuf2.getInt(dimIndex * V1Constants.Numbers.INTEGER_SIZE));
+        for (int index : sortOrder) {
+          int v1 = dimensionBuffer1.getInt(index * V1Constants.Numbers.INTEGER_SIZE);
+          int v2 = dimensionBuffer2.getInt(index * V1Constants.Numbers.INTEGER_SIZE);
           if (v1 != v2) {
             return v1 - v2;
           }
@@ -129,166 +103,140 @@ public class StarTreeDataTable {
 
       @Override
       public int compare(Integer o1, Integer o2) {
-        return compare(o1.intValue(), o2.intValue());
+        throw new UnsupportedOperationException();
       }
     };
 
     Swapper swapper = new Swapper() {
       @Override
       public void swap(int i, int j) {
-        int tmp = ids[i];
-        ids[i] = ids[j];
-        ids[j] = tmp;
+        int temp = docIds[i];
+        docIds[i] = docIds[j];
+        docIds[j] = temp;
       }
     };
-    Arrays.quickSort(0, numRecords, comparator, swapper);
-    return ids;
-  }
 
-  /**
-   * Helper method to re-arrange the given MMap buffer as per the sorted docId order.
-   *
-   * @param mappedByteBuffer Mmap buffer to re-arrange
-   * @param recordSizeInBytes Size of one record in bytes
-   * @param numRecords Total number of records
-   * @param sortedDocIds Sorted docId array
-   * @throws IOException
-   */
-  private void sortMmapBuffer(MMapBuffer mappedByteBuffer, long recordSizeInBytes, int numRecords, int[] sortedDocIds)
-      throws IOException {
-    int[] currentPositions = new int[numRecords];
-    int[] indexToRecordIdMapping = new int[numRecords];
-
-    for (int i = 0; i < numRecords; i++) {
-      currentPositions[i] = i;
-      indexToRecordIdMapping[i] = i;
-    }
-    for (int i = 0; i < numRecords; i++) {
-      int thisRecordId = indexToRecordIdMapping[i];
-      int thisRecordIdPos = currentPositions[thisRecordId];
-
-      int thatRecordId = sortedDocIds[i];
-      int thatRecordIdPos = currentPositions[thatRecordId];
-
-      // Swap the buffers
-      long thisOffset = thisRecordIdPos *  recordSizeInBytes;
-      long thatOffset = thatRecordIdPos *  recordSizeInBytes;
-
-      mappedByteBuffer.copyTo(thisOffset, dimMetLbuf1, 0, recordSizeInBytes);
-      mappedByteBuffer.copyTo(thatOffset, dimMetLbuf2, 0, recordSizeInBytes);
-
-      dimMetLbuf1.copyTo(0, mappedByteBuffer, thatOffset, recordSizeInBytes);
-      dimMetLbuf2.copyTo(0, mappedByteBuffer, thisOffset, recordSizeInBytes);
-
-      indexToRecordIdMapping[i] = thatRecordId;
-      indexToRecordIdMapping[thatRecordIdPos] = thisRecordId;
-
-      currentPositions[thatRecordId] = i;
-      currentPositions[thisRecordId] = thatRecordIdPos;
-    }
-
-    if (mappedByteBuffer != null) {
-      mappedByteBuffer.flush();
-      mappedByteBuffer.close();
-    }
-  }
-
-  /**
-   *
-   * @param startDocId inclusive
-   * @param endDocId exclusive
-   * @param colIndex
-   * @return start,end for each value. inclusive start, exclusive end
-   */
-  public Int2ObjectMap<IntPair> groupByIntColumnCount(int startDocId, int endDocId, Integer colIndex) {
-    MMapBuffer mappedByteBuffer = null;
     try {
-      int length = endDocId - startDocId;
-      Int2ObjectMap<IntPair> rangeMap = new Int2ObjectLinkedOpenHashMap<>();
-      final long startOffset = startDocId * (long) totalSizeInBytes;
-      mappedByteBuffer = new MMapBuffer(file, startOffset, length * (long) totalSizeInBytes, MMapMode.READ_WRITE);
-      int prevValue = -1;
-      int prevStart = 0;
-
-      for (int i = 0; i < length; i++) {
-        int value = flipEndiannessIfNeeded(
-            mappedByteBuffer.getInt((i * (long) totalSizeInBytes) + (colIndex * V1Constants.Numbers.INTEGER_SIZE)));
-
-        if (prevValue != -1 && prevValue != value) {
-          rangeMap.put(prevValue, new IntPair(startDocId + prevStart, startDocId + i));
-          prevStart = i;
-        }
-        prevValue = value;
-      }
-      rangeMap.put(prevValue, new IntPair(startDocId + prevStart, endDocId));
-      return rangeMap;
-    } catch (IOException e) {
-      e.printStackTrace();
+      Arrays.quickSort(0, _numDocs, comparator, swapper);
+      return docIds;
     } finally {
-      if (mappedByteBuffer != null) {
-        try {
-          mappedByteBuffer.close();
-        } catch (IOException e) {
-          e.printStackTrace();
-        }
-      }
+      dimensionBuffer1.release();
+      dimensionBuffer2.release();
     }
-    return EMPTY_INT_OBJECT_MAP;
   }
 
-  public Iterator<Pair<byte[], byte[]>> iterator(int startDocId, int endDocId) throws IOException {
-    final int length = endDocId - startDocId;
-    final long startOffset = startDocId * (long) totalSizeInBytes;
-    final MMapBuffer mappedByteBuffer = new MMapBuffer(file, startOffset, length * (long) totalSizeInBytes, MMapMode.READ_WRITE);
+  /**
+   * Re-arrange documents inside the data buffer based on the sorted document ids.
+   * <p>Each write places a document in it's proper location, so time complexity is O(n).
+   *
+   * @param sortedDocIds Array of sorted document ids (proper location of each document)
+   */
+  private void reArrangeDocs(int[] sortedDocIds) {
+    final LBuffer docBuffer = new LBuffer(_docSize);
+    try {
+      for (int i = 0; i < _numDocs; i++) {
+        if (i != sortedDocIds[i]) {
+          // Copy the document at index i into the first document buffer
+          _dataBuffer.copyTo(i * _docSize, docBuffer, 0, _docSize);
+
+          // The while loop will create a rotating cycle
+          int currentIndex = i;
+          int properDocId;
+          while (i != (properDocId = sortedDocIds[currentIndex])) {
+            // Put the document at properDocId into the currentIndex
+            _dataBuffer.copyTo(properDocId * _docSize, _dataBuffer, currentIndex * _docSize, _docSize);
+            sortedDocIds[currentIndex] = currentIndex;
+            currentIndex = properDocId;
+          }
+
+          // Put the document at index i into the correct location (currentIndex)
+          docBuffer.copyTo(0L, _dataBuffer, currentIndex * _docSize, _docSize);
+          sortedDocIds[currentIndex] = currentIndex;
+        }
+      }
+      if (_dataBuffer instanceof MMapBuffer) {
+        ((MMapBuffer) _dataBuffer).flush();
+      }
+    } finally {
+      docBuffer.release();
+    }
+  }
+
+  /**
+   * Group all documents based on a dimension's value.
+   *
+   * @param dimensionId Index of the dimension to group on
+   * @return Map from dimension value to a pair of start docId and end docId (exclusive)
+   */
+  public Int2ObjectMap<IntPair> groupOnDimension(int dimensionId) {
+    Int2ObjectMap<IntPair> rangeMap = new Int2ObjectLinkedOpenHashMap<>();
+    int dimensionOffset = dimensionId * V1Constants.Numbers.INTEGER_SIZE;
+    int currentValue = _dataBuffer.getInt(dimensionOffset);
+    int startDocId = 0;
+    for (int i = 1; i < _numDocs; i++) {
+      int value = _dataBuffer.getInt(i * _docSize + dimensionOffset);
+      if (value != currentValue) {
+        rangeMap.put(currentValue, new IntPair(startDocId, i));
+        currentValue = value;
+        startDocId = i;
+      }
+    }
+    rangeMap.put(currentValue, new IntPair(startDocId, _numDocs));
+    return rangeMap;
+  }
+
+  /**
+   * Get the iterator to iterate over all documents inside the data buffer.
+   *
+   * @return Iterator for pair of dimension bytes and metric bytes
+   */
+  public Iterator<Pair<byte[], byte[]>> iterator() {
     return new Iterator<Pair<byte[], byte[]>>() {
-      int pointer = 0;
+      private int _currentIndex = 0;
 
       @Override
       public boolean hasNext() {
-        return pointer < length;
+        return _currentIndex < _numDocs;
+      }
+
+      @Override
+      public Pair<byte[], byte[]> next() {
+        byte[] dimensionBytes = new byte[_dimensionSize];
+        byte[] metricBytes = new byte[_metricSize];
+        ByteBuffer byteBuffer = _dataBuffer.toDirectByteBuffer(_currentIndex++ * _docSize, (int) _docSize);
+        byteBuffer.get(dimensionBytes);
+        byteBuffer.get(metricBytes);
+        return new ImmutablePair<>(dimensionBytes, metricBytes);
       }
 
       @Override
       public void remove() {
         throw new UnsupportedOperationException();
       }
-
-      @Override
-      public Pair<byte[], byte[]> next() {
-        byte[] dimBuff = new byte[dimensionSizeInBytes];
-        byte[] metBuff = new byte[metricSizeInBytes];
-
-        mappedByteBuffer.toDirectByteBuffer(pointer * (long) totalSizeInBytes, dimensionSizeInBytes).get(dimBuff);
-        if (metricSizeInBytes > 0) {
-          mappedByteBuffer.toDirectByteBuffer(pointer * (long) totalSizeInBytes + dimensionSizeInBytes,
-              metricSizeInBytes).get(metBuff);
-        }
-        pointer = pointer + 1;
-        if(pointer == length){
-          try {
-            mappedByteBuffer.close();
-          } catch (IOException e) {
-            LOGGER.error("Exception caught in record iterator", e);
-          }
-        }
-        return Pair.of(dimBuff, metBuff);
-      }
     };
   }
 
   /**
-   * Flip the endianness of an int if needed. This is required when a file was written using
-   * FileOutputStream (which is BIG_ENDIAN), but memory mapped using MMapBuffer, which uses Java Unsafe,
-   * that can be LITTLE_ENDIAN if the host is LITTLE_ENDIAN.
+   * Set the value for each document at the specified index to the specified value.
    *
-   * @param value Input integer
-   * @return Flipped integer
+   * @param dimensionId Index of the dimension to set the value
+   * @param value Value to be set
    */
-  protected static int flipEndiannessIfNeeded(int value) {
-    if (nativeByteOrder == ByteOrder.LITTLE_ENDIAN) {
-      return ((value & 0xff) << 24) | ((value & 0xff00) << 8) | ((value & 0xff0000) >> 8) | ((value >> 24) & 0xff);
+  public void setDimensionValue(int dimensionId, int value) {
+    for (int i = 0; i < _numDocs; i++) {
+      _dataBuffer.putInt(i * _docSize + dimensionId * V1Constants.Numbers.INTEGER_SIZE, value);
+    }
+    if (_dataBuffer instanceof MMapBuffer) {
+      ((MMapBuffer) _dataBuffer).flush();
+    }
+  }
+
+  @Override
+  public void close() throws IOException {
+    if (_dataBuffer instanceof MMapBuffer) {
+      ((MMapBuffer) _dataBuffer).close();
     } else {
-      return value;
+      _dataBuffer.release();
     }
   }
 }

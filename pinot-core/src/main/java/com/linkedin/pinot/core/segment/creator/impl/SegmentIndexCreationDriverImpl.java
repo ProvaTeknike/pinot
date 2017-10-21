@@ -240,83 +240,83 @@ public class SegmentIndexCreationDriverImpl implements SegmentIndexCreationDrive
     starTreeBuilderConfig.setOutDir(starTreeTempDir);
 
     boolean enableOffHeapFormat = starTreeIndexSpec.isEnableOffHeapFormat();
-    starTreeBuilderConfig.setEnableOffHealpFormat(enableOffHeapFormat);
+    starTreeBuilderConfig.setEnableOffHeapFormat(enableOffHeapFormat);
 
     //initialize star tree builder
-    StarTreeBuilder starTreeBuilder = new OffHeapStarTreeBuilder();
-    starTreeBuilder.init(starTreeBuilderConfig);
-    //build star tree along with collecting stats
-    recordReader.rewind();
-    LOGGER.info("Start append raw data to star tree builder!");
-    totalDocs = 0;
-    GenericRow readRow = new GenericRow();
-    GenericRow transformedRow = new GenericRow();
-    while (recordReader.hasNext()) {
-      //PlainFieldExtractor conducts necessary type conversions
-      transformedRow = readNextRowSanitized(readRow, transformedRow);
-      //must be called after previous step since type conversion for derived values is unnecessary
-      populateDefaultDerivedColumnValues(transformedRow);
-      starTreeBuilder.append(transformedRow);
-      statsCollector.collectRow(transformedRow);
-      totalRawDocs++;
-      totalDocs++;
-    }
-    recordReader.close();
-    LOGGER.info("Start building star tree!");
-    starTreeBuilder.build();
-    LOGGER.info("Finished building star tree!");
-    long starTreeBuildFinishTime = System.currentTimeMillis();
-    //build stats
-    // Count the number of documents and gather per-column statistics
-    LOGGER.info("Start building StatsCollector!");
-    Iterator<GenericRow> aggregatedRowsIterator = starTreeBuilder.iterator(starTreeBuilder.getTotalRawDocumentCount(),
-        starTreeBuilder.getTotalRawDocumentCount() + starTreeBuilder.getTotalAggregateDocumentCount());
-    while (aggregatedRowsIterator.hasNext()) {
-      GenericRow genericRow = aggregatedRowsIterator.next();
-      statsCollector.collectRow(genericRow, true /* isAggregated */);
-      totalAggDocs++;
-      totalDocs++;
-    }
-    statsCollector.build();
-    buildIndexCreationInfo();
-    LOGGER.info("Collected stats for {} raw documents, {} aggregated documents", totalRawDocs, totalAggDocs);
-    long statCollectionFinishTime = System.currentTimeMillis();
-
-    try {
-      // Initialize the index creation using the per-column statistics information
-      indexCreator.init(config, segmentIndexCreationInfo, indexCreationInfoMap, dataSchema, tempIndexDir);
-
-      //iterate over the data again,
-      Iterator<GenericRow> allRowsIterator = starTreeBuilder.iterator(0,
-          starTreeBuilder.getTotalRawDocumentCount() + starTreeBuilder.getTotalAggregateDocumentCount());
-
-      while (allRowsIterator.hasNext()) {
-        GenericRow genericRow = allRowsIterator.next();
-        indexCreator.indexRow(genericRow);
+    try (StarTreeBuilder starTreeBuilder = new OffHeapStarTreeBuilder()) {
+      starTreeBuilder.init(starTreeBuilderConfig);
+      //build star tree along with collecting stats
+      recordReader.rewind();
+      LOGGER.info("Start append raw data to star tree builder!");
+      totalDocs = 0;
+      GenericRow readRow = new GenericRow();
+      GenericRow transformedRow = new GenericRow();
+      while (recordReader.hasNext()) {
+        //PlainFieldExtractor conducts necessary type conversions
+        transformedRow = readNextRowSanitized(readRow, transformedRow);
+        //must be called after previous step since type conversion for derived values is unnecessary
+        populateDefaultDerivedColumnValues(transformedRow);
+        starTreeBuilder.append(transformedRow);
+        statsCollector.collectRow(transformedRow);
+        totalRawDocs++;
+        totalDocs++;
       }
-    } catch (Exception e) {
-      indexCreator.close();
-      throw e;
-    }
+      recordReader.close();
+      LOGGER.info("Start building star tree!");
+      starTreeBuilder.build();
+      LOGGER.info("Finished building star tree!");
+      long starTreeBuildFinishTime = System.currentTimeMillis();
+      //build stats
+      // Count the number of documents and gather per-column statistics
+      LOGGER.info("Start building StatsCollector!");
+      Iterator<GenericRow> aggregatedRowsIterator = starTreeBuilder.iterator(starTreeBuilder.getTotalRawDocumentCount(),
+          starTreeBuilder.getTotalRawDocumentCount() + starTreeBuilder.getTotalAggregateDocumentCount());
+      while (aggregatedRowsIterator.hasNext()) {
+        GenericRow genericRow = aggregatedRowsIterator.next();
+        statsCollector.collectRow(genericRow, true /* isAggregated */);
+        totalAggDocs++;
+        totalDocs++;
+      }
+      statsCollector.build();
+      buildIndexCreationInfo();
+      LOGGER.info("Collected stats for {} raw documents, {} aggregated documents", totalRawDocs, totalAggDocs);
+      long statCollectionFinishTime = System.currentTimeMillis();
 
-    // If no dimensionsSplitOrder was specified in starTreeIndexSpec, set the order used by the starTreeBuilder.
-    // This is required so the dimensionsSplitOrder used by the builder can be written into the segment metadata.
-    if (dimensionsSplitOrder == null || dimensionsSplitOrder.isEmpty()) {
-      starTreeIndexSpec.setDimensionsSplitOrder(starTreeBuilder.getDimensionsSplitOrder());
-    }
+      try {
+        // Initialize the index creation using the per-column statistics information
+        indexCreator.init(config, segmentIndexCreationInfo, indexCreationInfoMap, dataSchema, tempIndexDir);
 
-    if (skipMaterializationForDimensions == null || skipMaterializationForDimensions.isEmpty()) {
-      starTreeIndexSpec.setSkipMaterializationForDimensions(starTreeBuilder.getSkipMaterializationForDimensions());
-    }
+        //iterate over the data again,
+        Iterator<GenericRow> allRowsIterator = starTreeBuilder.iterator(0,
+            starTreeBuilder.getTotalRawDocumentCount() + starTreeBuilder.getTotalAggregateDocumentCount());
 
-    serializeTree(starTreeBuilder, enableOffHeapFormat);
-    //post creation
-    handlePostCreation();
-    starTreeBuilder.cleanup();
-    long end = System.currentTimeMillis();
-    LOGGER.info("Total time:{} \n star tree build time:{} \n stat collection time:{} \n column index build time:{}",
-        (end - start), (starTreeBuildFinishTime - start), statCollectionFinishTime - starTreeBuildFinishTime,
-        end - statCollectionFinishTime);
+        while (allRowsIterator.hasNext()) {
+          GenericRow genericRow = allRowsIterator.next();
+          indexCreator.indexRow(genericRow);
+        }
+      } catch (Exception e) {
+        indexCreator.close();
+        throw e;
+      }
+
+      // If no dimensionsSplitOrder was specified in starTreeIndexSpec, set the order used by the starTreeBuilder.
+      // This is required so the dimensionsSplitOrder used by the builder can be written into the segment metadata.
+      if (dimensionsSplitOrder == null || dimensionsSplitOrder.isEmpty()) {
+        starTreeIndexSpec.setDimensionsSplitOrder(starTreeBuilder.getDimensionsSplitOrder());
+      }
+
+      if (skipMaterializationForDimensions == null || skipMaterializationForDimensions.isEmpty()) {
+        starTreeIndexSpec.setSkipMaterializationForDimensions(starTreeBuilder.getSkipMaterializationForDimensions());
+      }
+
+      serializeTree(starTreeBuilder, enableOffHeapFormat);
+      //post creation
+      handlePostCreation();
+      long end = System.currentTimeMillis();
+      LOGGER.info("Total time:{} \n star tree build time:{} \n stat collection time:{} \n column index build time:{}",
+          (end - start), (starTreeBuildFinishTime - start), statCollectionFinishTime - starTreeBuildFinishTime,
+          end - statCollectionFinishTime);
+    }
   }
 
   private void serializeTree(StarTreeBuilder starTreeBuilder, boolean enableOffHeapFormat)

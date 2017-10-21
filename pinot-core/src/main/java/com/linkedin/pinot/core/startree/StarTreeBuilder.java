@@ -15,25 +15,18 @@
  */
 package com.linkedin.pinot.core.startree;
 
+import com.google.common.collect.HashBiMap;
+import com.linkedin.pinot.core.data.GenericRow;
+import java.io.Closeable;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import com.google.common.collect.HashBiMap;
-import com.linkedin.pinot.core.data.GenericRow;
 import java.util.Set;
 
 
-public interface StarTreeBuilder {
+public interface StarTreeBuilder extends Closeable {
   /**
    * Initializes the builder, called before append.
-   *
-   * @param splitOrder
-   *  The dimensions that should be used in successive splits down the tree.
-   * @param maxLeafRecords
-   *  The maximum number of records that can exist at a leaf, if there are still split dimensions available.
-   * @param table
-   *  The temporary table to store dimensional data.
-   * @throws Exception
    */
   void init(StarTreeBuilderConfig config) throws Exception;
 
@@ -48,11 +41,6 @@ public interface StarTreeBuilder {
    * @throws Exception
    */
   void build() throws Exception;
-
-  /**
-   * Clean up any temporary files/directories, called at the end.
-   */
-  void cleanup();
 
   /**
    * Returns the root node of the tree (after build).

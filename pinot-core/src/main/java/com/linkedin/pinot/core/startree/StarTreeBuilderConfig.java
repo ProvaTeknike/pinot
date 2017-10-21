@@ -15,11 +15,10 @@
  */
 package com.linkedin.pinot.core.startree;
 
+import com.linkedin.pinot.common.data.Schema;
 import com.linkedin.pinot.common.data.StarTreeIndexSpec;
 import java.io.File;
 import java.util.List;
-
-import com.linkedin.pinot.common.data.Schema;
 import java.util.Set;
 
 
@@ -37,7 +36,7 @@ public class StarTreeBuilderConfig {
   private Set<String> skipMaterializationForDimensions;
   private int skipMaterializationCardinalityThreshold =
       StarTreeIndexSpec.DEFAULT_SKIP_MATERIALIZATION_CARDINALITY_THRESHOLD;
-  private boolean enableOffHealpFormat;
+  private boolean _enableOffHeapFormat;
 
   public StarTreeBuilderConfig() {
   }
@@ -113,15 +112,15 @@ public class StarTreeBuilderConfig {
    * Returns True if StarTreeOffHeap is enabled, false otherwise.
    * @return
    */
-  public boolean isEnableOffHealpFormat() {
-    return enableOffHealpFormat;
+  public boolean isEnableOffHeapFormat() {
+    return _enableOffHeapFormat;
   }
 
   /**
    * Enable/Disable StarTreeOffHeap
-   * @param enableOffHealpFormat
+   * @param enableOffHeapFormat
    */
-  public void setEnableOffHealpFormat(boolean enableOffHealpFormat) {
-    this.enableOffHealpFormat = enableOffHealpFormat;
+  public void setEnableOffHeapFormat(boolean enableOffHeapFormat) {
+    _enableOffHeapFormat = enableOffHeapFormat;
   }
 }
